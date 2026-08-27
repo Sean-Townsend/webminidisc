@@ -288,9 +288,7 @@ export function TrackRow({
             )}
             <TableCell align="right" className={classes.durationCell}>
                 {track.channel === 1 && <span className={classes.channelBadge}>MONO</span>}
-                {!formatInfo ? (
-                    <span className={classes.formatBadge}>??</span>
-                ) : formatInfo.availableBitrates.length > 1 ? (
+                {((!formatInfo) || formatInfo.availableBitrates.length > 1) ? (
                     <Tooltip title={`${track.encoding.bitrate!} kbps`}>
                         <span className={classes.formatBadge}>{track.encoding.codec}</span>
                     </Tooltip>
