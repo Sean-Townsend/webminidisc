@@ -44,7 +44,9 @@ export class NetworkWMService extends NetMDService {
         const fs = await FSAHiMDFilesystem.init(false);
         await initializeIfNeeded(fs, this.device.databaseParameters?.initLayers ?? []);
         this.database = await DatabaseAbstraction.create(fs, this.device);
-        this.name = this.device.name;
+        // See NetworkWMService's equivalent fix: Sony reused the same USB product ID (0x0210)
+        // across the NW-HD1/HD2/HD3 line, so a device using that PID could be any of the three.
+        this.name = this.device.name === 'Sony NW-HD3' ? 'Sony NW-HD1/2/3' : this.device.name;
         return true;
     }
 

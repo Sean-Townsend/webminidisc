@@ -378,6 +378,83 @@ export function getGroupedTracks(disc: Disc | null) {
     return groupedList;
 }
 
+export type TrackListViewMode = 'track' | 'album' | 'artist';
+
+/**
+ * Re-groups tracks by their own artist/album ID3-style tags, purely for display/navigation
+ * purposes - unlike getGroupedTracks(), this does NOT reflect the device's actual stored
+ * group boundaries (which on some devices, e.g. Network Walkman, are themselves *derived*
+ * from these same tags, and can end up as many single-track groups if tagging is inconsistent
+ * between tracks of the same album - e.g. slightly different casing/spacing in the album tag).
+ *
+ * Because this is view-only, it must never be passed to rename/delete-group actions: those
+ * operate on the device's real group indices, which this function does not preserve in any
+ * way that round-trips correctly (see aggregateIndex below).
+ */
+export function getTagGroupedTracks(disc: Disc | null, mode: 'album' | 'artist'): Group[] {
+    if (!disc) {
+        return [];
+    }
+    const allTracks = getSortedTracks(disc);
+    // Bucket by a normalized (trimmed, lowercased) key so trivial tag inconsistencies - a
+    // trailing space, or different casing between tracks of the same album - don't split what's
+    // really one album/artist into several single-track entries. The bucket's *display* title
+    // uses the exact tag text of whichever variant occurs most often, so we don't invent or
+    // rewrite anything - we're only choosing which existing spelling to show for the merged group.
+    const buckets = new Map<string, { displayTitleCounts: Map<string, number>; tracks: DisplayTrack[] }>();
+    const order: string[] = [];
+
+    for (const track of allTracks) {
+        const rawValue = (mode === 'album' ? track.album : track.artist)?.trim() || '';
+        const normalizedKey = rawValue.toLowerCase();
+        if (!buckets.has(normalizedKey)) {
+            buckets.set(normalizedKey, { displayTitleCounts: new Map(), tracks: [] });
+            order.push(normalizedKey);
+        }
+        const bucket = buckets.get(normalizedKey)!;
+        bucket.tracks.push(track);
+        bucket.displayTitleCounts.set(rawValue, (bucket.displayTitleCounts.get(rawValue) ?? 0) + 1);
+    }
+
+    // Keep untagged tracks ("") last, as a single "No Album"/"No Artist" bucket, everything else
+    // sorted alphabetically by display title.
+    const sortedKeys = [...order].sort((a, b) => {
+        if (a === '' && b !== '') return 1;
+        if (b === '' && a !== '') return -1;
+        return a.localeCompare(b);
+    });
+
+    let aggregateIndex = -2; // Purely a display/React-key aid; never a real device group index.
+    return sortedKeys.map((normalizedKey) => {
+        const { displayTitleCounts, tracks } = buckets.get(normalizedKey)!;
+        // Pick the most common exact-cased variant as the display title (ties broken by first seen).
+        let displayTitle = '';
+        let bestCount = -1;
+        for (const [variant, count] of displayTitleCounts) {
+            if (count > bestCount) {
+                bestCount = count;
+                displayTitle = variant;
+            }
+        }
+        return {
+            index: aggregateIndex--,
+            title: displayTitle || null,
+            fullWidthTitle: null,
+            tracks: tracks.map((t) => ({
+                index: t.index,
+                title: t.title,
+                fullWidthTitle: t.fullWidthTitle,
+                duration: t.duration,
+                channel: 2,
+                encoding: { codec: t.encoding, bitrate: 0 } as any,
+                protected: 0 as any,
+                album: t.album,
+                artist: t.artist,
+            })),
+        };
+    });
+}
+
 export function recomputeGroupsAfterTrackMove(disc: Disc, trackIndex: number, targetIndex: number) {
     // Used for moving tracks in netmd-mock and deleting
     let offset = trackIndex > targetIndex ? 1 : -1;

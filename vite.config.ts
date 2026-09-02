@@ -10,6 +10,14 @@ if(!base.endsWith("/")) base += '/';
 
 console.log(`Building for base = ${base}`);
 
+// The Electron (ElectronWMD) build uses the sandbox:// scheme and is a native desktop app,
+// not a browser tab - it doesn't need (or want) the offline-caching PWA service worker that
+// the browser-hosted version relies on. Registering a service worker here is actively harmful
+// for this build: it can silently keep serving a stale cached bundle after a rebuild, since the
+// packaged app never does a hard reload / cache-busting navigation between runs. Skip PWA/SW
+// registration entirely when building for the sandbox:// scheme.
+const isElectronSandboxBuild = base.startsWith('sandbox://');
+
 // https://vitejs.dev/config/
 export default ({ mode }) => {
   return defineConfig({
@@ -23,7 +31,7 @@ export default ({ mode }) => {
         },
         exclude: ['buffer'],
       }),
-      VitePWA({
+      ...(isElectronSandboxBuild ? [] : [VitePWA({
         registerType: 'autoUpdate',
         manifestFilename: 'manifest.json',
         manifest: {
@@ -81,7 +89,7 @@ export default ({ mode }) => {
             },
           ],
         },
-      }),
+      })]),
     ],
     build: {
       commonjsOptions: { transformMixedEsModules: true },

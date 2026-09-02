@@ -261,7 +261,8 @@ const InternalApp = () => {
                         {', '}
                         <Link rel="noopener noreferrer" color="inherit" target="_blank" href="https://github.com/asivery/">
                             Asivery
-                        </Link>{' '}
+                        </Link>
+                        {', Sean Townsend '}
                         {new Date().getFullYear()}
                         {'.'}
                     </Typography>

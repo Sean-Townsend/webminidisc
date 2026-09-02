@@ -1,17 +1,7 @@
 import React, { useEffect, useCallback, useState } from 'react';
 import { useDeviceCapabilities, useDispatch } from '../frontend-utils';
 import { FileRejection, useDropzone } from 'react-dropzone';
-import {
-    DragDropContext,
-    Draggable,
-    DraggableProvided,
-    DropResult,
-    ResponderProvided,
-    Droppable,
-    DroppableProvided,
-    DroppableStateSnapshot,
-} from 'react-beautiful-dnd';
-import { listContent, deleteTracks, moveTrack, groupTracks, deleteGroups, dragDropTrack, ejectDisc, flushDevice } from '../redux/actions';
+import { listContent, deleteTracks, moveTrack, groupTracks, deleteGroups, ejectDisc, flushDevice } from '../redux/actions';
 import { actions as renameDialogActions, RenameType } from '../redux/rename-dialog-feature';
 import { actions as convertDialogActions } from '../redux/convert-dialog-feature';
 import { actions as dumpDialogActions } from '../redux/dump-dialog-feature';
@@ -24,24 +14,29 @@ import { control, openLocalLibrary } from '../redux/actions';
 import {
     formatTimeFromSeconds,
     getGroupedTracks,
+    getTagGroupedTracks,
     getSortedTracks,
     isSequential,
     acceptedTypes,
     AdaptiveFile,
     bytesToHumanReadable,
+    TrackListViewMode,
 } from '../utils';
-import { belowDesktop, forAnyDesktop, useShallowEqualSelector, themeSpacing, batchActions } from '../frontend-utils';
+import { forAnyDesktop, useShallowEqualSelector, themeSpacing, batchActions } from '../frontend-utils';
 
 import { makeStyles } from 'tss-react/mui';
 import { alpha, lighten } from '@mui/material/styles';
 import Typography from '@mui/material/Typography';
 import Box from '@mui/material/Box';
-import Fab from '@mui/material/Fab';
 import AddIcon from '@mui/icons-material/Add';
 import DeleteIcon from '@mui/icons-material/Delete';
 import EditIcon from '@mui/icons-material/Edit';
 import Backdrop from '@mui/material/Backdrop';
 import CreateNewFolderIcon from '@mui/icons-material/CreateNewFolder';
+import UnfoldMoreIcon from '@mui/icons-material/UnfoldMore';
+import UnfoldLessIcon from '@mui/icons-material/UnfoldLess';
+import ToggleButtonGroup from '@mui/material/ToggleButtonGroup';
+import ToggleButton from '@mui/material/ToggleButton';
 import EjectIcon from '@mui/icons-material/Eject';
 import DoneIcon from '@mui/icons-material/Done';
 
@@ -56,7 +51,8 @@ import IconButton from '@mui/material/IconButton';
 import Toolbar from '@mui/material/Toolbar';
 import Tooltip from '@mui/material/Tooltip';
 
-import { GroupRow, LeftInNondefaultCodecs, MockTrackRow, TrackRow } from './main-rows';
+import { LeftInNondefaultCodecs } from './main-rows';
+import { VirtualTrackList, flattenGroupedTracks } from './virtual-track-list';
 import { RenameDialog } from './rename-dialog';
 import { UploadDialog } from './upload-dialog';
 import { RecordDialog } from './record-dialog';
@@ -87,16 +83,10 @@ import serviceRegistry from '../services/registry';
 // TODO jss-to-tss-react codemod: Unable to handle style definition reliably. Unsupported arrow function syntax.
 //Unexpected value type of ConditionalExpression.
 const useStyles = makeStyles()((theme) => ({
-    add: {
-        position: 'absolute',
-        bottom: theme.spacing(3),
-        right: theme.spacing(3),
-        [belowDesktop(theme)]: {
-            bottom: theme.spacing(2),
-        },
-    },
     main: {
-        overflowY: 'auto',
+        display: 'flex',
+        flexDirection: 'column',
+        minHeight: 0,
         flex: '1 1 auto',
         marginBottom: theme.spacing(3),
         outline: 'none',
@@ -118,6 +108,9 @@ const useStyles = makeStyles()((theme) => ({
     },
     toolbarLabel: {
         flex: '1 1 100%',
+    },
+    viewModeGroup: {
+        marginRight: theme.spacing(1),
     },
     toolbarHighlight:
         theme.palette.mode === 'light'
@@ -200,6 +193,26 @@ export const Main = (props: {}) => {
     const [lastClicked, setLastClicked] = useState(-1);
     const [moveMenuAnchorEl, setMoveMenuAnchorEl] = React.useState<null | HTMLElement>(null);
     const [showRemainingSpace, setShowRemainingSpace] = useState(true);
+    // Collapse state is kept separately per view mode, so switching between Tracks/Albums/Artists
+    // doesn't lose (or leak) collapse state from a different mode - group indices aren't even
+    // comparable across modes (tag-derived Album/Artist views use synthetic negative indices,
+    // unrelated to the device's real group indices used in Track view).
+    const [collapsedGroupsByMode, setCollapsedGroupsByMode] = React.useState<Record<TrackListViewMode, Set<number>>>(() => ({
+        track: new Set(),
+        album: new Set(),
+        artist: new Set(),
+    }));
+    const [viewMode, setViewMode] = React.useState<TrackListViewMode>('album');
+    const collapsedGroups = collapsedGroupsByMode[viewMode];
+    const setCollapsedGroups = useCallback(
+        (updater: Set<number> | ((prev: Set<number>) => Set<number>)) => {
+            setCollapsedGroupsByMode((prev) => ({
+                ...prev,
+                [viewMode]: typeof updater === 'function' ? (updater as (prev: Set<number>) => Set<number>)(prev[viewMode]) : updater,
+            }));
+        },
+        [viewMode]
+    );
 
     const deviceCapabilities = useDeviceCapabilities();
     const minidiscSpec = serviceRegistry.netmdSpec;
@@ -222,18 +235,6 @@ export const Main = (props: {}) => {
         [dispatch, selected, handleCloseMoveMenu]
     );
 
-    const handleDrop = useCallback(
-        (result: DropResult, provided: ResponderProvided) => {
-            if (!result.destination) return;
-            const sourceList = parseInt(result.source.droppableId),
-                sourceIndex = result.source.index,
-                targetList = parseInt(result.destination.droppableId),
-                targetIndex = result.destination.index;
-            dispatch(dragDropTrack(sourceList, sourceIndex, targetList, targetIndex));
-        },
-        [dispatch]
-    );
-
     const handleShowDumpDialog = useCallback(() => {
         dispatch(dumpDialogActions.setVisible(true));
     }, [dispatch]);
@@ -243,9 +244,21 @@ export const Main = (props: {}) => {
     }, [dispatch]);
 
     useEffect(() => {
-        setSelected([]); // Reset selection if disc changes
+        // Reset selection if disc changes. Note this only fires when the disc's *identity*
+        // (title, or null <-> non-null) changes - i.e. an actual different disc/device was
+        // connected - not on every listContent() refresh. Deleting/renaming tracks, uploading,
+        // etc. all trigger a content refresh (a brand new `disc` object) on the *same* disc, and
+        // must not reset collapsed-album state or the user's current selection: previously they
+        // did, which meant deleting tracks from one expanded album while others were collapsed
+        // caused every album to silently re-expand once the delete finished.
+        setSelected([]);
         setSelectedGroups([]);
-    }, [disc]);
+        // Default to a fully-collapsed Album view on every fresh disc/device connection (Track
+        // and Artist views start expanded, matching prior behavior) - collapsed will be filled
+        // in properly once the real album list is known, by the effect below.
+        setCollapsedGroupsByMode({ track: new Set(), album: new Set(), artist: new Set() });
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [disc?.title, disc === null]);
 
     const [wasLastDiscNull, setWasLastDiscNull] = useState<boolean>(false);
     const discProtectedDialogDisabled = useShallowEqualSelector((state) => state.appState.discProtectedDialogDisabled);
@@ -277,12 +290,82 @@ export const Main = (props: {}) => {
         onDrop,
         accept: acceptedTypes,
         noClick: true,
+        // react-dropzone tracks focus on its root element (#main, which wraps the whole track
+        // list) purely to support opening the file picker via keyboard (Space/Enter). Since that
+        // keyboard shortcut isn't used or needed here, `noKeyboard` disables that focus tracking
+        // entirely (per react-dropzone's own docs: "it also stops tracking the focus state").
+        // Without this, every native `focus` event on any interactive element inside the track
+        // list (buttons, etc.) bubbles up to this root's onFocus handler, which dispatches into
+        // react-dropzone's internal reducer and re-renders Main. When that re-render happens
+        // between a button's mousedown and mouseup - which it does, since focus fires on
+        // mousedown - the virtualized list's rows get torn down and rebuilt mid-click, and the
+        // browser cancels the click because its target was removed from the DOM while pressed.
+        // That's what caused chevron/delete clicks in the track list to silently do nothing.
+        noKeyboard: true,
     });
 
     const { classes, cx } = useStyles();
     const tracks = useMemo(() => getSortedTracks(disc), [disc]);
-    const groupedTracks = useMemo(() => getGroupedTracks(disc), [disc]);
+    const deviceGroupedTracks = useMemo(() => getGroupedTracks(disc), [disc]);
+    // Album/Artist view modes re-group by the tracks' own tags (see getTagGroupedTracks) rather
+    // than the device's stored group boundaries, since those can fragment a single album into
+    // many single-track groups when tagging is inconsistent between tracks. This is view-only -
+    // it's never passed to group rename/delete, which still operate on deviceGroupedTracks.
+    const groupedTracks = useMemo(
+        () => (viewMode === 'track' ? deviceGroupedTracks : getTagGroupedTracks(disc, viewMode)),
+        [viewMode, deviceGroupedTracks, disc]
+    );
+    const isTagDerivedView = viewMode !== 'track';
+    const flatRows = useMemo(() => flattenGroupedTracks(groupedTracks, collapsedGroups), [groupedTracks, collapsedGroups]);
+    const namedGroupIndices = useMemo(() => groupedTracks.filter((g) => g.title !== null).map((g) => g.index), [groupedTracks]);
+    const allGroupsCollapsed = namedGroupIndices.length > 0 && namedGroupIndices.every((idx) => collapsedGroups.has(idx));
+
+    // Default all three views (Tracks, Albums, Artists) to fully collapsed as soon as real
+    // content is available for a freshly-connected disc. This only fires once per disc identity
+    // (tracked via defaultedForDiscRef) so it doesn't fight the user's own collapse/expand
+    // choices on later content refreshes from the same disc (e.g. after deletes).
+    const defaultedForDiscRef = React.useRef<string | null>(null);
+    useEffect(() => {
+        const discIdentity = disc === null ? null : disc.title ?? '';
+        if (discIdentity === null || defaultedForDiscRef.current === discIdentity) {
+            return;
+        }
+        const trackGroups = getGroupedTracks(disc);
+        const albumGroups = getTagGroupedTracks(disc, 'album');
+        const artistGroups = getTagGroupedTracks(disc, 'artist');
+        const trackIndices = trackGroups.filter((g) => g.title !== null).map((g) => g.index);
+        const albumIndices = albumGroups.filter((g) => g.title !== null).map((g) => g.index);
+        const artistIndices = artistGroups.filter((g) => g.title !== null).map((g) => g.index);
+        if (albumIndices.length === 0 && artistIndices.length === 0 && trackIndices.length === 0) {
+            return; // Content not loaded yet (or genuinely no groups at all) - try again once it changes.
+        }
+        defaultedForDiscRef.current = discIdentity;
+        setCollapsedGroupsByMode({
+            track: new Set(trackIndices),
+            album: new Set(albumIndices),
+            artist: new Set(artistIndices),
+        });
+    }, [disc]);
     const defaultCodecName = minidiscSpec ? getDefaultCodecName(minidiscSpec) : '';
+
+    const handleToggleCollapseGroup = useCallback(
+        (event: React.MouseEvent, groupIdx: number) => {
+            setCollapsedGroups((prev) => {
+                const next = new Set(prev);
+                if (next.has(groupIdx)) {
+                    next.delete(groupIdx);
+                } else {
+                    next.add(groupIdx);
+                }
+                return next;
+            });
+        },
+        [setCollapsedGroups]
+    );
+
+    const handleToggleCollapseAllGroups = useCallback(() => {
+        setCollapsedGroups((prev) => (prev.size > 0 && allGroupsCollapsed ? new Set() : new Set(namedGroupIndices)));
+    }, [allGroupsCollapsed, namedGroupIndices, setCollapsedGroups]);
 
     // Action Handlers
     const handleSelectTrackClick = useCallback(
@@ -320,6 +403,11 @@ export const Main = (props: {}) => {
 
     const handleSelectGroupClick = useCallback(
         (event: React.MouseEvent, item: number) => {
+            // In Album/Artist view, "groups" are synthetic (re-derived from tags for display
+            // only) and don't correspond to any real device group, so group-level actions like
+            // rename/delete/select don't apply - clicking just does nothing rather than acting on
+            // a meaningless index.
+            if (isTagDerivedView) return;
             setSelected([]);
             if (selectedGroups.includes(item)) {
                 setSelectedGroups(selectedGroups.filter((i) => i !== item));
@@ -327,7 +415,7 @@ export const Main = (props: {}) => {
                 setSelectedGroups([...selectedGroups, item]);
             }
         },
-        [selectedGroups, setSelected, setSelectedGroups]
+        [isTagDerivedView, selectedGroups, setSelected, setSelectedGroups]
     );
 
     const handleSelectAllClick = useCallback(
@@ -369,6 +457,7 @@ export const Main = (props: {}) => {
 
     const handleRenameGroup = useCallback(
         (event: React.MouseEvent, index: number) => {
+            if (isTagDerivedView) return; // Synthetic group in Album/Artist view - not renameable.
             const group = groupedTracks.find((g) => g.index === index);
             if (!group) {
                 return;
@@ -384,7 +473,7 @@ export const Main = (props: {}) => {
                 ])
             );
         },
-        [dispatch, groupedTracks]
+        [dispatch, groupedTracks, isTagDerivedView]
     );
 
     const handleRenameActionClick = useCallback(
@@ -419,17 +508,35 @@ export const Main = (props: {}) => {
     const handleDeleteGroup = useCallback(
         (event: React.MouseEvent, index: number) => {
             event.stopPropagation();
+            if (isTagDerivedView) return; // Synthetic group in Album/Artist view - nothing to ungroup.
+            const group = groupedTracks.find((g) => g.index === index);
+            const label = group?.title ? `"${group.title}"` : 'this album';
+            if (
+                !window.confirm(
+                    `Ungroup ${label}?\n\nThis removes the album grouping. On some devices (e.g. Network Walkman) groups are derived from track tags and this has no effect; on others (NetMD/HiMD) it splits the tracks back out of the group. In both cases the tracks themselves are not deleted.`
+                )
+            ) {
+                return;
+            }
             dispatch(deleteGroups([index]));
         },
-        [dispatch]
+        [dispatch, groupedTracks, isTagDerivedView]
     );
 
     const handleDeleteSelectedGroups = useCallback(
         (event: React.MouseEvent) => {
+            if (isTagDerivedView) return;
+            if (
+                !window.confirm(
+                    `Ungroup ${selectedGroups.length} selected album${selectedGroups.length === 1 ? '' : 's'}?\n\nThis removes the album grouping. On some devices (e.g. Network Walkman) groups are derived from track tags and this has no effect; on others (NetMD/HiMD) it splits the tracks back out of the group. In both cases the tracks themselves are not deleted.`
+                )
+            ) {
+                return;
+            }
             dispatch(deleteGroups(selectedGroups));
             setSelectedGroups([]);
         },
-        [dispatch, selectedGroups, setSelectedGroups]
+        [dispatch, selectedGroups, setSelectedGroups, isTagDerivedView]
     );
 
     const handleEject = useCallback(
@@ -480,11 +587,12 @@ export const Main = (props: {}) => {
     );
 
     const canGroup = useMemo(() => {
+        if (isTagDerivedView) return false; // "Group" creates a real device group from selected tracks' positions - meaningless while browsing a tag-derived view.
         return (
             tracks.filter((n) => n.group === null && selected.includes(n.index)).length === selected.length &&
             isSequential(selected.sort((a, b) => a - b))
         );
-    }, [tracks, selected]);
+    }, [tracks, selected, isTagDerivedView]);
 
     const selectedCount = selected.length;
     const selectedGroupsCount = selectedGroups.length;
@@ -553,6 +661,14 @@ export const Main = (props: {}) => {
                     {deviceName || `Loading...`}
                 </Typography>
                 <span>
+                    {deviceCapabilities.trackUpload && (
+                        <Tooltip title="Upload tracks">
+                            <IconButton aria-label="add" onClick={openUploadMenu} disabled={!disc}>
+                                <AddIcon />
+                            </IconButton>
+                        </Tooltip>
+                    )}
+
                     {deviceCapabilities.discEject && (
                         <IconButton
                             aria-label="actions"
@@ -648,6 +764,37 @@ export const Main = (props: {}) => {
                         {disc ? disc?.title || `Untitled Disc` : ''}
                     </Typography>
                 )}
+                {selectedCount === 0 && selectedGroupsCount === 0 ? (
+                    <ToggleButtonGroup
+                        size="small"
+                        exclusive
+                        value={viewMode}
+                        onChange={(event, newMode) => newMode !== null && setViewMode(newMode)}
+                        aria-label="track list view mode"
+                        className={classes.viewModeGroup}
+                    >
+                        <ToggleButton value="track" aria-label="track view">
+                            Tracks
+                        </ToggleButton>
+                        <ToggleButton value="album" aria-label="album view">
+                            Albums
+                        </ToggleButton>
+                        <ToggleButton value="artist" aria-label="artist view">
+                            Artists
+                        </ToggleButton>
+                    </ToggleButtonGroup>
+                ) : null}
+                {selectedCount === 0 && selectedGroupsCount === 0 && namedGroupIndices.length > 0 ? (
+                    <Tooltip title={allGroupsCollapsed ? 'Expand all albums' : 'Collapse all albums'}>
+                        <IconButton
+                            className={classes.topbarButton}
+                            aria-label={allGroupsCollapsed ? 'expand all albums' : 'collapse all albums'}
+                            onClick={handleToggleCollapseAllGroups}
+                        >
+                            {allGroupsCollapsed ? <UnfoldMoreIcon /> : <UnfoldLessIcon />}
+                        </IconButton>
+                    </Tooltip>
+                ) : null}
                 {selectedCount > 0 ? (
                     <React.Fragment>
                         <Tooltip title={`${deviceCapabilities.trackDownload ? 'Download' : 'Record'} from MD`}>
@@ -741,93 +888,28 @@ export const Main = (props: {}) => {
             {deviceCapabilities.contentList ? (
                 <Box className={classes.main} {...getRootProps()} id="main">
                     <input {...getInputProps()} />
-                    <Table size="small" className={classes.fixedTable}>
-                        <TableHead>
-                            <TableRow>
-                                <TableCell className={classes.dragHandleEmpty}></TableCell>
-                                <TableCell className={classes.indexCell}>#</TableCell>
-                                <TableCell>Title</TableCell>
-                                {deviceCapabilities.himdTitles && (
-                                    <>
-                                        <TableCell>Album</TableCell>
-                                        <TableCell>Artist</TableCell>
-                                    </>
-                                )}
-                                <TableCell align="right">Duration</TableCell>
-                            </TableRow>
-                        </TableHead>
-                        <DragDropContext onDragEnd={handleDrop}>
-                            <TableBody>
-                                {groupedTracks.map((group, index) => (
-                                    <TableRow key={`${index}`}>
-                                        <TableCell colSpan={4 + (deviceCapabilities.himdTitles ? 2 : 0)} style={{ padding: '0' }}>
-                                            <Table size="small" className={classes.fixedTable}>
-                                                <Droppable droppableId={`${index}`} key={`${index}`}>
-                                                    {(provided: DroppableProvided, snapshot: DroppableStateSnapshot) => (
-                                                        <TableBody
-                                                            {...provided.droppableProps}
-                                                            ref={provided.innerRef}
-                                                            className={cx({ [classes.hoveringOverGroup]: snapshot.isDraggingOver })}
-                                                        >
-                                                            <MockTrackRow isHimdTrack={deviceCapabilities.himdTitles} />
-                                                            {group.title !== null && (
-                                                                <GroupRow
-                                                                    usesHimdTracks={deviceCapabilities.himdTitles}
-                                                                    group={group}
-                                                                    onRename={handleRenameGroup}
-                                                                    onDelete={handleDeleteGroup}
-                                                                    isSelected={selectedGroups.includes(group.index)}
-                                                                    onSelect={handleSelectGroupClick}
-                                                                />
-                                                            )}
-                                                            {group.title === null && group.tracks.length === 0 && (
-                                                                <TableRow style={{ height: '1px' }} />
-                                                            )}
-                                                            {group.tracks.map((t, tidx) => (
-                                                                <Draggable
-                                                                    draggableId={`${group.index}-${t.index}`}
-                                                                    key={`t-${t.index}`}
-                                                                    index={tidx}
-                                                                    isDragDisabled={!deviceCapabilities.metadataEdit}
-                                                                >
-                                                                    {(provided: DraggableProvided) => (
-                                                                        <TrackRow
-                                                                            track={t}
-                                                                            isHimdTrack={deviceCapabilities.himdTitles}
-                                                                            draggableProvided={provided}
-                                                                            inGroup={group.title !== null}
-                                                                            isSelected={selected.includes(t.index)}
-                                                                            trackStatus={getTrackStatus(t, deviceStatus)}
-                                                                            onSelect={handleSelectTrackClick}
-                                                                            onRename={handleRenameTrack}
-                                                                            onTogglePlayPause={handleTogglePlayPauseTrack}
-                                                                            onOpenContextMenu={(e) => handleOpenContextMenu(e, t)}
-                                                                        />
-                                                                    )}
-                                                                </Draggable>
-                                                            ))}
-                                                            {provided.placeholder}
-                                                        </TableBody>
-                                                    )}
-                                                </Droppable>
-                                            </Table>
-                                        </TableCell>
-                                    </TableRow>
-                                ))}
-                            </TableBody>
-                        </DragDropContext>
-                    </Table>
+                    <VirtualTrackList
+                        rows={flatRows}
+                        usesHimdTracks={deviceCapabilities.himdTitles}
+                        groupsAreEditable={!isTagDerivedView}
+                        selectedTracks={selected}
+                        selectedGroups={selectedGroups}
+                        getTrackStatus={(t) => getTrackStatus(t, deviceStatus)}
+                        onSelectTrack={handleSelectTrackClick}
+                        onSelectGroup={handleSelectGroupClick}
+                        onRenameTrack={handleRenameTrack}
+                        onRenameGroup={handleRenameGroup}
+                        onDeleteGroup={handleDeleteGroup}
+                        onToggleCollapseGroup={handleToggleCollapseGroup}
+                        onTogglePlayPauseTrack={handleTogglePlayPauseTrack}
+                        onOpenContextMenu={handleOpenContextMenu}
+                    />
                     {isDragActive && deviceCapabilities.trackUpload ? (
                         <Backdrop className={classes.backdrop} open={isDragActive}>
                             Drop your Music to Upload
                         </Backdrop>
                     ) : null}
                 </Box>
-            ) : null}
-            {deviceCapabilities.trackUpload ? (
-                <Fab color="primary" aria-label="add" className={classes.add} onClick={openUploadMenu}>
-                    <AddIcon />
-                </Fab>
             ) : null}
             <Menu anchorEl={uploadMenuAnchorEl} open={Boolean(uploadMenuAnchorEl)} onClose={() => setUploadMenuAnchorEl(null)}>
                 <MenuItem

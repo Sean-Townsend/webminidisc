@@ -72,6 +72,50 @@ class NetMDMockService extends NetMDService {
             title: 'Mock Track 5',
             fullWidthTitle: 'スコット と リバース',
         },
+        // DEBUG: extra mock albums/tracks added temporarily to reproduce and verify the fix
+        // for the album-collapse feature on a large-ish library, without needing the real device.
+        // Safe to remove once the bug is confirmed fixed.
+        ...(() => {
+            const extra: Track[] = [];
+            let idx = 5;
+            for (let album = 1; album <= 8; album++) {
+                for (let t = 1; t <= 6; t++) {
+                    // Deliberately vary the album tag's casing/whitespace across tracks of the
+                    // same album (mirrors real-world inconsistent tagging), to exercise/verify
+                    // getTagGroupedTracks()'s normalization when testing the Album/Artist view.
+                    const albumTagVariant = t % 3 === 0 ? `debug album ${album} ` : `Debug Album ${album}`;
+                    extra.push({
+                        duration: (2 + (t % 3)) * 60,
+                        encoding: { codec: 'SPS' as const, bitrate: 292 },
+                        index: idx++,
+                        channel: Channels.stereo,
+                        protected: TrackFlag.unprotected,
+                        title: `Album ${album} - Track ${t}`,
+                        fullWidthTitle: '',
+                        album: albumTagVariant,
+                        artist: `Debug Artist ${((album - 1) % 3) + 1}`,
+                    });
+                }
+            }
+            // Pad out well past 1000 tracks, so the track-number column can be verified against
+            // 4-digit numbers (mirrors real large libraries, e.g. 3000+ tracks on an NW-HD1).
+            for (let album = 9; album <= 200; album++) {
+                for (let t = 1; t <= 6; t++) {
+                    extra.push({
+                        duration: (2 + (t % 3)) * 60,
+                        encoding: { codec: 'SPS' as const, bitrate: 292 },
+                        index: idx++,
+                        channel: Channels.stereo,
+                        protected: TrackFlag.unprotected,
+                        title: `Album ${album} - Track ${t}`,
+                        fullWidthTitle: '',
+                        album: `Debug Album ${album}`,
+                        artist: `Debug Artist ${((album - 1) % 3) + 1}`,
+                    });
+                }
+            }
+            return extra;
+        })(),
     ];
     public _groupsDef: {
         index: number;
@@ -91,6 +135,22 @@ class NetMDMockService extends NetMDService {
             index: 1,
             tracksIdx: [0, 1],
         },
+        // DEBUG: matching groups for the extra mock tracks above - one 6-track "album" per group.
+        ...(() => {
+            const extraGroups: { index: number; title: string | null; fullWidthTitle: string | null; tracksIdx: number[] }[] = [];
+            let idx = 5;
+            for (let album = 1; album <= 200; album++) {
+                const tracksIdx = [idx, idx + 1, idx + 2, idx + 3, idx + 4, idx + 5];
+                idx += 6;
+                extraGroups.push({
+                    index: 1 + album,
+                    title: `Debug Album ${album}`,
+                    fullWidthTitle: '',
+                    tracksIdx,
+                });
+            }
+            return extraGroups;
+        })(),
     ];
 
     private capabilities: Capability[] = [];
@@ -125,6 +185,10 @@ class NetMDMockService extends NetMDService {
         if (capabilityTrackDownload) this.capabilities.push(Capability.trackDownload);
         if (capabilityFactoryMode) this.capabilities.push(Capability.factoryMode);
         if (capabilityFullWidthTitles) this.capabilities.push(Capability.fullWidthSupport);
+        // DEBUG: always report himdTitles so the Album/Artist header columns (and the
+        // Album/Artist track-list view mode's album/artist tag columns) are visible when testing
+        // with this mock device, matching the real NW-HD1's reported capabilities.
+        this.capabilities.push(Capability.himdTitles);
     }
 
     public _getGroups(): Group[] {

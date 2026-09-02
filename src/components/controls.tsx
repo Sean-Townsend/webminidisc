@@ -337,27 +337,35 @@ export const Controls = () => {
         return <W95Controls {...p} />;
     }
 
+    // The transport control buttons already hide themselves when the device can't report/accept
+    // playback commands (deviceCapabilities.playbackControl). The LCD strip below them - track
+    // info, spinning disc icon, progress bar - previously rendered unconditionally regardless of
+    // that same capability, which meant it always displayed placeholder state (e.g. "track 1")
+    // as if something were cued up, even on devices where the app has no real playback status to
+    // show at all. Hide the whole control bar together on those devices instead.
+    if (!deviceCapabilities.playbackControl) {
+        return null;
+    }
+
     return (
         <Box className={classes.container}>
-            {deviceCapabilities.playbackControl ? (
-                <React.Fragment>
-                    <IconButton disabled={!disc} aria-label="prev" onClick={handlePrev} className={classes.button}>
-                        <SkipPreviousIcon />
-                    </IconButton>
-                    <IconButton disabled={!disc} aria-label="play" onClick={handlePlay} className={classes.button}>
-                        <PlayArrowIcon />
-                    </IconButton>
-                    <IconButton disabled={!disc} aria-label="pause" onClick={handlePause} className={classes.button}>
-                        <PauseIcon />
-                    </IconButton>
-                    <IconButton disabled={!disc} aria-label="stop" onClick={handleStop} className={classes.button}>
-                        <StopIcon />
-                    </IconButton>
-                    <IconButton disabled={!disc} aria-label="next" onClick={handleNext} className={classes.button}>
-                        <SkipNextIcon />
-                    </IconButton>
-                </React.Fragment>
-            ) : null}
+            <React.Fragment>
+                <IconButton disabled={!disc} aria-label="prev" onClick={handlePrev} className={classes.button}>
+                    <SkipPreviousIcon />
+                </IconButton>
+                <IconButton disabled={!disc} aria-label="play" onClick={handlePlay} className={classes.button}>
+                    <PlayArrowIcon />
+                </IconButton>
+                <IconButton disabled={!disc} aria-label="pause" onClick={handlePause} className={classes.button}>
+                    <PauseIcon />
+                </IconButton>
+                <IconButton disabled={!disc} aria-label="stop" onClick={handleStop} className={classes.button}>
+                    <StopIcon />
+                </IconButton>
+                <IconButton disabled={!disc} aria-label="next" onClick={handleNext} className={classes.button}>
+                    <SkipNextIcon />
+                </IconButton>
+            </React.Fragment>
             <div className={classes.lcd} onClick={lcdClickPrevent ? () => setLCDClickPrevent(false) : handleLCDClick}>
                 <div className={classes.lcdText}>
                     <span

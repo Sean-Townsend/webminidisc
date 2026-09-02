@@ -2,6 +2,22 @@ import { ChangelogVersion } from "./bridge-types";
 
 export const CHANGELOG: ChangelogVersion[] = [
     {
+        name: "Version 2.0.0",
+        contents: [
+            "Added a virtualized track list for large libraries (thousands of tracks) - fixes severe scrolling lag",
+            "Added Tracks / Albums / Artists view modes, with albums/artists re-grouped from track tags (fixes fragmented albums caused by inconsistent tagging)",
+            "Added collapsible albums/artists, with collapse state remembered separately per view mode and defaulting to fully collapsed on a fresh connection",
+            "Added a confirmation dialog before ungrouping an album, with accurate wording for devices where groups are virtual (e.g. Network Walkman) vs real (NetMD/HiMD)",
+            "Fixed collapsed albums silently re-expanding after deleting/renaming/uploading tracks",
+            "Fixed clicking the album collapse/delete buttons sometimes doing nothing (react-dropzone's keyboard focus tracking was intercepting the click)",
+            "Fixed track numbers being clipped to a single digit for devices with more than 9 tracks",
+            "Moved the upload button out of a floating overlay (was overlapping the last track) into the toolbar",
+            "Hid the playback transport bar entirely on devices that don't support remote playback control, instead of showing a misleading default state",
+            "Fixed the Title column header not lining up with track/album titles",
+            "Fixed Sony NW-HD1/NW-HD2/NW-HD3 all reporting as \"NW-HD3\" due to a shared USB product ID",
+        ],
+    },
+    {
         name: "Version 1.6.0",
         contents: [
             "Added a local high-quality ATRAC3/3+ encoder",
