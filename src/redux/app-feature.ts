@@ -62,7 +62,7 @@ export const buildInitialState = (): AppState => {
         lastSelectedService: loadPreference('lastSelectedService', 0),
         factoryModeRippingInMainUi: false, // As this value is heavily device-dependent and not really that stable yet
         // it should not be stored in the preferences, and should default to false.
-        audioExportService: loadPreference('audioExportService', 0),
+        audioExportService: loadPreference('audioExportService', 1), // Default to Atracdenc (index 1); At3RE (index 0) requires a harness file that isn't distributed
         audioExportServiceConfig: loadPreference('audioExportServiceConfig', {}),
         libraryService: loadPreference('libraryService', -1),
         libraryServiceConfig: loadPreference('libraryServiceConfig', {}),
