@@ -53,6 +53,19 @@ function rowKey(row: FlatRow): string {
 }
 
 /**
+ * The text a row is matched against for the type-to-jump feature below - a group's
+ * title, or a track's title (falling back to "No Title" to mirror what's actually
+ * displayed, so an untitled track is reachable by typing its literal placeholder text).
+ */
+function rowSearchText(row: FlatRow): string {
+    return (row.type === 'group' ? row.group.title : row.track.title) || 'No Title';
+}
+
+/** How long a user has, after their last keystroke, to add another character to the
+ * current search buffer before it's treated as a fresh search (Explorer-style typeahead). */
+const TYPEAHEAD_TIMEOUT_MS = 1000;
+
+/**
  * Flattens getGroupedTracks()'s Group[] into a single list of group-header and track rows,
  * suitable for virtualization. Tracks belonging to a group whose index is present in
  * `collapsedGroups` are omitted (Explorer-style collapse), leaving just the header row.
@@ -78,6 +91,9 @@ const useStyles = makeStyles<{ hasHimdColumns: boolean }>()((theme, { hasHimdCol
     listContainer: {
         flex: '1 1 auto',
         overflow: 'hidden',
+        // Focusable (for the type-to-jump feature) but shouldn't show a focus ring -
+        // the selected row's own highlight already communicates state.
+        outline: 'none',
         display: 'flex',
         flexDirection: 'column',
     },
@@ -436,6 +452,53 @@ export function VirtualTrackList({
 }: VirtualTrackListProps) {
     const { classes } = useStyles({ hasHimdColumns: usesHimdTracks });
     const containerRef = useRef<HTMLDivElement>(null);
+    const listRef = useRef<FixedSizeList>(null);
+
+    /**
+     * Explorer-style type-to-jump: typing a letter (or several letters in quick
+     * succession) scrolls the list to the next row whose title starts with that
+     * text, cycling back to the top once the end is reached. Repeatedly pressing
+     * the same single letter cycles through every match for that letter, matching
+     * the behaviour Windows Explorer and most native list views use.
+     */
+    const typeaheadRef = useRef({ buffer: '', lastTime: 0, lastMatchIndex: -1 });
+    const handleKeyDown = useCallback(
+        (event: React.KeyboardEvent) => {
+            // Single printable character only - avoid hijacking Ctrl/Alt/Meta combos,
+            // arrow keys, Enter, Delete, etc., which either already do something else
+            // in this list or are handled elsewhere.
+            if (event.key.length !== 1 || event.ctrlKey || event.metaKey || event.altKey) return;
+
+            const now = Date.now();
+            const state = typeaheadRef.current;
+            const isFreshSearch = now - state.lastTime > TYPEAHEAD_TIMEOUT_MS;
+            const typedChar = event.key.toLowerCase();
+            // Repeatedly typing the *same* single character cycles through matches
+            // rather than requiring the search text to keep growing, e.g. pressing
+            // "h" three times jumps to the 1st, then 2nd, then 3rd title starting with "h".
+            const isRepeatOfSameChar = !isFreshSearch && state.buffer.length === 1 && state.buffer === typedChar;
+            state.buffer = isFreshSearch || isRepeatOfSameChar ? typedChar : state.buffer + typedChar;
+            state.lastTime = now;
+
+            const searchFrom = isRepeatOfSameChar ? state.lastMatchIndex + 1 : 0;
+            const query = state.buffer;
+            let matchIndex = -1;
+            for (let i = 0; i < rows.length; i++) {
+                const idx = (searchFrom + i) % rows.length;
+                if (rowSearchText(rows[idx]).toLowerCase().startsWith(query)) {
+                    matchIndex = idx;
+                    break;
+                }
+            }
+
+            if (matchIndex !== -1) {
+                state.lastMatchIndex = matchIndex;
+                listRef.current?.scrollToItem(matchIndex, 'smart');
+                event.preventDefault();
+            }
+        },
+        [rows]
+    );
 
     const Row = useCallback(
         ({ index, style }: ListChildComponentProps) => {
@@ -492,7 +555,13 @@ export function VirtualTrackList({
     );
 
     return (
-        <div className={classes.listContainer} ref={containerRef}>
+        <div
+            className={classes.listContainer}
+            ref={containerRef}
+            tabIndex={0}
+            onKeyDown={handleKeyDown}
+            onMouseDown={() => containerRef.current?.focus()}
+        >
             <div className={classes.headerRow}>
                 <div style={{ textAlign: 'right' }}>#</div>
                 {/* Group/track rows show a folder or play/pause icon inline before the title text
@@ -508,7 +577,7 @@ export function VirtualTrackList({
                 <div style={{ textAlign: 'right' }}>Duration</div>
             </div>
             <div style={{ flex: '1 1 auto', minHeight: 0 }}>
-                <AutoSizedList itemCount={rows.length} rowRenderer={Row} itemKey={(index) => rowKey(rows[index])} />
+                <AutoSizedList listRef={listRef} itemCount={rows.length} rowRenderer={Row} itemKey={(index) => rowKey(rows[index])} />
             </div>
         </div>
     );
@@ -521,10 +590,12 @@ export function VirtualTrackList({
  * behavior.
  */
 function AutoSizedList({
+    listRef,
     itemCount,
     rowRenderer,
     itemKey,
 }: {
+    listRef?: React.RefObject<FixedSizeList>;
     itemCount: number;
     rowRenderer: (props: ListChildComponentProps) => JSX.Element;
     itemKey: (index: number) => React.Key;
@@ -558,6 +629,7 @@ function AutoSizedList({
         <div ref={wrapperRef} style={{ width: '100%', height: '100%' }}>
             {size.width > 0 && size.height > 0 && (
                 <FixedSizeList
+                    ref={listRef}
                     height={size.height}
                     width={size.width}
                     itemCount={itemCount}
