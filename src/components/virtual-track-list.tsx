@@ -1,4 +1,4 @@
-import React, { useCallback, useMemo, useRef } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef } from 'react';
 import { FixedSizeList, ListChildComponentProps } from 'react-window';
 import { makeStyles } from 'tss-react/mui';
 import { alpha, lighten } from '@mui/material/styles';
@@ -91,9 +91,6 @@ const useStyles = makeStyles<{ hasHimdColumns: boolean }>()((theme, { hasHimdCol
     listContainer: {
         flex: '1 1 auto',
         overflow: 'hidden',
-        // Focusable (for the type-to-jump feature) but shouldn't show a focus ring -
-        // the selected row's own highlight already communicates state.
-        outline: 'none',
         display: 'flex',
         flexDirection: 'column',
     },
@@ -460,14 +457,25 @@ export function VirtualTrackList({
      * text, cycling back to the top once the end is reached. Repeatedly pressing
      * the same single letter cycles through every match for that letter, matching
      * the behaviour Windows Explorer and most native list views use.
+     *
+     * Listens on `window` rather than requiring the list itself to hold keyboard
+     * focus first: nothing inside the list is focused by default when a disc's
+     * content first loads (the user hasn't clicked a row yet), so a focus-only
+     * listener would silently do nothing until the user happened to click inside
+     * the list first - indistinguishable from "doesn't work" from the outside.
      */
     const typeaheadRef = useRef({ buffer: '', lastTime: 0, lastMatchIndex: -1 });
-    const handleKeyDown = useCallback(
-        (event: React.KeyboardEvent) => {
+    useEffect(() => {
+        const handleWindowKeyDown = (event: KeyboardEvent) => {
             // Single printable character only - avoid hijacking Ctrl/Alt/Meta combos,
-            // arrow keys, Enter, Delete, etc., which either already do something else
-            // in this list or are handled elsewhere.
+            // arrow keys, Enter, Delete, etc.
             if (event.key.length !== 1 || event.ctrlKey || event.metaKey || event.altKey) return;
+
+            // Don't hijack typing into text inputs, dialogs, contenteditable areas, etc.
+            // (rename dialog, settings fields, custom-parameter inputs, ...).
+            const target = event.target as HTMLElement | null;
+            const tag = target?.tagName;
+            if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || target?.isContentEditable) return;
 
             const now = Date.now();
             const state = typeaheadRef.current;
@@ -496,9 +504,11 @@ export function VirtualTrackList({
                 listRef.current?.scrollToItem(matchIndex, 'smart');
                 event.preventDefault();
             }
-        },
-        [rows]
-    );
+        };
+
+        window.addEventListener('keydown', handleWindowKeyDown);
+        return () => window.removeEventListener('keydown', handleWindowKeyDown);
+    }, [rows]);
 
     const Row = useCallback(
         ({ index, style }: ListChildComponentProps) => {
@@ -555,13 +565,7 @@ export function VirtualTrackList({
     );
 
     return (
-        <div
-            className={classes.listContainer}
-            ref={containerRef}
-            tabIndex={0}
-            onKeyDown={handleKeyDown}
-            onMouseDown={() => containerRef.current?.focus()}
-        >
+        <div className={classes.listContainer} ref={containerRef}>
             <div className={classes.headerRow}>
                 <div style={{ textAlign: 'right' }}>#</div>
                 {/* Group/track rows show a folder or play/pause icon inline before the title text
